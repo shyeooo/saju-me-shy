@@ -4,6 +4,9 @@ import { getSajuReading } from './gemini'
 import { isSupabaseConfigured, supabase } from './supabase'
 import './App.css'
 
+const READING_SELECT =
+  'id, name, birth_date, birth_time, gender, calendar_type, result, created_at'
+
 function App() {
   // 입력 값들
   const [name, setName] = useState('')
@@ -15,24 +18,38 @@ function App() {
   // Gemini 결과 관련 상태
   const [result, setResult] = useState('')
   const [loading, setLoading] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const skeletonRef = useRef(null)
   const resultRef = useRef(null)
 
-  // 저장된 사주 목록 (사이드바)
+  // 저장된 사주 목록 (사이드바) — Read
   const [readings, setReadings] = useState([])
   const [selectedId, setSelectedId] = useState(null)
+
+  function readingPayload(resultText) {
+    return {
+      name,
+      birth_date: birthDate,
+      birth_time: birthTime || null,
+      gender,
+      calendar_type: calendarType,
+      result: resultText,
+    }
+  }
 
   async function loadReadings() {
     if (!supabase) return
 
     const { data, error: fetchError } = await supabase
       .from('saju_readings')
-      .select('id, name, birth_date, birth_time, gender, calendar_type, result, created_at')
+      .select(READING_SELECT)
       .order('created_at', { ascending: false })
 
     if (fetchError) {
       console.error(fetchError)
+      setError('저장된 사주를 불러오지 못했습니다.')
       return
     }
 
@@ -65,8 +82,8 @@ function App() {
     setCalendarType(reading.calendar_type ?? '')
     setResult(reading.result ?? '')
     setError('')
+    setNotice('')
 
-    // 다음 페인트 후 결과 영역으로 부드럽게 이동
     requestAnimationFrame(() => {
       resultRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     })
@@ -81,24 +98,27 @@ function App() {
     setCalendarType('')
     setResult('')
     setError('')
+    setNotice('')
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
-  const resultParagraphs = result
-    .split(/\n+/)
-    .map((part) => part.trim())
-    .filter(Boolean)
-
-  async function handleGetSaju() {
+  function validateForm() {
     if (!name || !birthDate || !gender || !calendarType) {
       setError('이름, 생년월일, 성별, 양력/음력은 꼭 입력해 주세요.')
-      return
+      return false
     }
+    return true
+  }
 
+  // Create / Update(재해석): 사주 보기
+  async function handleGetSaju() {
+    if (!validateForm()) return
+
+    const editingId = selectedId
     setLoading(true)
     setError('')
+    setNotice('')
     setResult('')
-    setSelectedId(null)
 
     try {
       const text = await getSajuReading({
@@ -117,25 +137,39 @@ function App() {
         return
       }
 
-      const { data, error: saveError } = await supabase
-        .from('saju_readings')
-        .insert({
-          name,
-          birth_date: birthDate,
-          birth_time: birthTime || null,
-          gender,
-          calendar_type: calendarType,
-          result: text,
-        })
-        .select('id, name, birth_date, birth_time, gender, calendar_type, result, created_at')
-        .single()
+      if (editingId) {
+        const { data, error: updateError } = await supabase
+          .from('saju_readings')
+          .update(readingPayload(text))
+          .eq('id', editingId)
+          .select(READING_SELECT)
+          .single()
 
-      if (saveError) {
-        console.error(saveError)
-        setError('사주 해석은 됐지만 저장에 실패했습니다.')
-      } else if (data) {
-        setReadings((prev) => [data, ...prev])
-        setSelectedId(data.id)
+        if (updateError) {
+          console.error(updateError)
+          setError('사주 해석은 됐지만 수정에 실패했습니다.')
+        } else if (data) {
+          setReadings((prev) =>
+            prev.map((item) => (item.id === data.id ? data : item)),
+          )
+          setSelectedId(data.id)
+          setNotice('사주 해석을 다시 저장했어요.')
+        }
+      } else {
+        const { data, error: saveError } = await supabase
+          .from('saju_readings')
+          .insert(readingPayload(text))
+          .select(READING_SELECT)
+          .single()
+
+        if (saveError) {
+          console.error(saveError)
+          setError('사주 해석은 됐지만 저장에 실패했습니다.')
+        } else if (data) {
+          setReadings((prev) => [data, ...prev])
+          setSelectedId(data.id)
+          setNotice('새 사주를 저장했어요.')
+        }
       }
     } catch (err) {
       console.error(err)
@@ -148,6 +182,92 @@ function App() {
       setLoading(false)
     }
   }
+
+  // Update: 입력값·현재 결과만 저장 (재해석 없이)
+  async function handleUpdateReading() {
+    if (!selectedId) {
+      setError('수정할 사주를 사이드바에서 먼저 선택해 주세요.')
+      return
+    }
+    if (!validateForm()) return
+    if (!result) {
+      setError('저장할 사주 결과가 없습니다. 먼저 사주 보기를 해 주세요.')
+      return
+    }
+    if (!supabase) {
+      setError('Supabase가 설정되지 않아 수정할 수 없습니다.')
+      return
+    }
+
+    setSaving(true)
+    setError('')
+    setNotice('')
+
+    const { data, error: updateError } = await supabase
+      .from('saju_readings')
+      .update(readingPayload(result))
+      .eq('id', selectedId)
+      .select(READING_SELECT)
+      .single()
+
+    setSaving(false)
+
+    if (updateError) {
+      console.error(updateError)
+      setError('수정에 실패했습니다.')
+      return
+    }
+
+    if (data) {
+      setReadings((prev) =>
+        prev.map((item) => (item.id === data.id ? data : item)),
+      )
+      setNotice('수정 내용을 저장했어요.')
+    }
+  }
+
+  // Delete
+  async function handleDeleteReading() {
+    if (!selectedId) {
+      setError('삭제할 사주를 사이드바에서 먼저 선택해 주세요.')
+      return
+    }
+    if (!supabase) {
+      setError('Supabase가 설정되지 않아 삭제할 수 없습니다.')
+      return
+    }
+
+    const ok = window.confirm(`「${name || '이 사주'}」를 삭제할까요?`)
+    if (!ok) return
+
+    setSaving(true)
+    setError('')
+    setNotice('')
+
+    const { error: deleteError } = await supabase
+      .from('saju_readings')
+      .delete()
+      .eq('id', selectedId)
+
+    setSaving(false)
+
+    if (deleteError) {
+      console.error(deleteError)
+      setError('삭제에 실패했습니다.')
+      return
+    }
+
+    setReadings((prev) => prev.filter((item) => item.id !== selectedId))
+    handleNewSaju()
+    setNotice('사주를 삭제했어요.')
+  }
+
+  const resultParagraphs = result
+    .split(/\n+/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+
+  const isEditing = Boolean(selectedId)
 
   return (
     <div className="layout">
@@ -245,10 +365,35 @@ function App() {
             type="button"
             className="submit-btn"
             onClick={handleGetSaju}
-            disabled={loading}
+            disabled={loading || saving}
           >
-            {loading ? '사주를 읽는 중…' : '사주 보기'}
+            {loading
+              ? '사주를 읽는 중…'
+              : isEditing
+                ? '다시 해석하고 수정'
+                : '사주 보기'}
           </button>
+
+          {isEditing && (
+            <div className="action-row">
+              <button
+                type="button"
+                className="secondary-btn"
+                onClick={handleUpdateReading}
+                disabled={loading || saving}
+              >
+                {saving ? '저장 중…' : '수정 저장'}
+              </button>
+              <button
+                type="button"
+                className="danger-btn"
+                onClick={handleDeleteReading}
+                disabled={loading || saving}
+              >
+                삭제
+              </button>
+            </div>
+          )}
         </section>
 
         <div className="preview">
@@ -260,8 +405,8 @@ function App() {
         </div>
 
         {error && <p className="error">{error}</p>}
+        {notice && !error && <p className="notice">{notice}</p>}
 
-        {/* 해석 요청 중에는 결과 자리를 스켈레톤으로 미리 보여줍니다 */}
         {loading && (
           <section
             ref={skeletonRef}
@@ -301,12 +446,7 @@ function App() {
             <h2>{name}님의 이야기</h2>
             {(birthDate || gender || calendarType) && (
               <p className="result-meta">
-                {[
-                  birthDate,
-                  birthTime || null,
-                  gender,
-                  calendarType,
-                ]
+                {[birthDate, birthTime || null, gender, calendarType]
                   .filter(Boolean)
                   .join(' · ')}
               </p>
