@@ -1,7 +1,7 @@
 // useState: React에서 변하는 값(상태)을 기억하고 화면을 다시 그리게 해주는 기능
 import { useEffect, useRef, useState } from 'react'
 import { getSajuReading } from './gemini'
-import { supabase } from './supabase'
+import { isSupabaseConfigured, supabase } from './supabase'
 import './App.css'
 
 function App() {
@@ -24,6 +24,8 @@ function App() {
   const [selectedId, setSelectedId] = useState(null)
 
   async function loadReadings() {
+    if (!supabase) return
+
     const { data, error: fetchError } = await supabase
       .from('saju_readings')
       .select('id, name, birth_date, birth_time, gender, calendar_type, result, created_at')
@@ -38,6 +40,12 @@ function App() {
   }
 
   useEffect(() => {
+    if (!isSupabaseConfigured) {
+      setError(
+        'Supabase 환경 변수가 없습니다. Vercel Environment Variables에 VITE_SUPABASE_URL과 VITE_SUPABASE_PUBLISHABLE_KEY를 넣고 다시 배포해 주세요.',
+      )
+      return
+    }
     loadReadings()
   }, [])
 
@@ -101,6 +109,13 @@ function App() {
         calendarType,
       })
       setResult(text)
+
+      if (!supabase) {
+        setError(
+          '사주 해석은 됐지만 Supabase가 설정되지 않아 저장하지 못했습니다.',
+        )
+        return
+      }
 
       const { data, error: saveError } = await supabase
         .from('saju_readings')
