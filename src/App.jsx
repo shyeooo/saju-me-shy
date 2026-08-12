@@ -8,6 +8,11 @@ const READING_SELECT =
   'id, name, birth_date, birth_time, gender, calendar_type, result, created_at'
 
 function App() {
+  // 인증
+  const [user, setUser] = useState(null)
+  const [authLoading, setAuthLoading] = useState(true)
+  const [authBusy, setAuthBusy] = useState(false)
+
   // 입력 값들
   const [name, setName] = useState('')
   const [birthDate, setBirthDate] = useState('')
@@ -28,8 +33,8 @@ function App() {
   const [readings, setReadings] = useState([])
   const [selectedId, setSelectedId] = useState(null)
 
-  function readingPayload(resultText) {
-    return {
+  function readingPayload(resultText, { includeUserId = false } = {}) {
+    const payload = {
       name,
       birth_date: birthDate,
       birth_time: birthTime || null,
@@ -37,10 +42,16 @@ function App() {
       calendar_type: calendarType,
       result: resultText,
     }
+
+    if (includeUserId && user?.id) {
+      payload.user_id = user.id
+    }
+
+    return payload
   }
 
   async function loadReadings() {
-    if (!supabase) return
+    if (!supabase || !user) return
 
     const { data, error: fetchError } = await supabase
       .from('saju_readings')
@@ -57,14 +68,86 @@ function App() {
   }
 
   useEffect(() => {
-    if (!isSupabaseConfigured) {
+    if (!isSupabaseConfigured || !supabase) {
+      setAuthLoading(false)
       setError(
         'Supabase 환경 변수가 없습니다. Vercel Environment Variables에 VITE_SUPABASE_URL과 VITE_SUPABASE_PUBLISHABLE_KEY를 넣고 다시 배포해 주세요.',
       )
       return
     }
-    loadReadings()
+
+    const params = new URLSearchParams(window.location.search)
+    const hashParams = new URLSearchParams(
+      window.location.hash.startsWith('#')
+        ? window.location.hash.slice(1)
+        : window.location.hash,
+    )
+    const oauthError =
+      params.get('error_description') ||
+      hashParams.get('error_description') ||
+      params.get('error') ||
+      hashParams.get('error')
+
+    if (oauthError) {
+      setError(decodeURIComponent(oauthError.replace(/\+/g, ' ')))
+      window.history.replaceState({}, document.title, window.location.pathname)
+    }
+
+    let mounted = true
+
+    supabase.auth.getSession().then(({ data, error: sessionError }) => {
+      if (!mounted) return
+      if (sessionError) {
+        console.error(sessionError)
+        setError('로그인 상태를 확인하지 못했습니다.')
+      }
+      setUser(data.session?.user ?? null)
+      setAuthLoading(false)
+    })
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((event, session) => {
+      setUser(session?.user ?? null)
+      setAuthLoading(false)
+
+      if (event === 'SIGNED_IN') {
+        const fromOAuthCallback =
+          window.location.search.includes('code=') ||
+          window.location.hash.includes('access_token')
+        const dirty =
+          fromOAuthCallback ||
+          window.location.search.includes('error') ||
+          window.location.hash.includes('error')
+
+        if (dirty) {
+          window.history.replaceState({}, document.title, window.location.pathname)
+        }
+        if (fromOAuthCallback) {
+          setNotice('Google 로그인에 성공했어요.')
+        }
+      }
+
+      if (event === 'SIGNED_OUT') {
+        setReadings([])
+        setSelectedId(null)
+      }
+    })
+
+    return () => {
+      mounted = false
+      subscription.unsubscribe()
+    }
   }, [])
+
+  useEffect(() => {
+    if (!user) {
+      setReadings([])
+      setSelectedId(null)
+      return
+    }
+    loadReadings()
+  }, [user])
 
   // 로딩이 시작되면 스켈레톤 영역이 보이도록 스크롤합니다.
   useEffect(() => {
@@ -72,6 +155,53 @@ function App() {
       skeletonRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }
   }, [loading])
+
+  async function handleGoogleLogin() {
+    if (!supabase) {
+      setError('Supabase가 설정되지 않아 로그인할 수 없습니다.')
+      return
+    }
+
+    setAuthBusy(true)
+    setError('')
+    setNotice('')
+
+    const { error: oauthError } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: window.location.origin,
+        queryParams: {
+          prompt: 'select_account',
+        },
+      },
+    })
+
+    if (oauthError) {
+      console.error(oauthError)
+      setError('Google 로그인을 시작하지 못했습니다. 설정을 확인해 주세요.')
+      setAuthBusy(false)
+    }
+  }
+
+  async function handleLogout() {
+    if (!supabase) return
+
+    setAuthBusy(true)
+    setError('')
+    setNotice('')
+
+    const { error: signOutError } = await supabase.auth.signOut()
+    setAuthBusy(false)
+
+    if (signOutError) {
+      console.error(signOutError)
+      setError('로그아웃에 실패했습니다.')
+      return
+    }
+
+    handleNewSaju()
+    setNotice('로그아웃했어요.')
+  }
 
   function handleSelectReading(reading) {
     setSelectedId(reading.id)
@@ -112,6 +242,10 @@ function App() {
 
   // Create / Update(재해석): 사주 보기
   async function handleGetSaju() {
+    if (!user) {
+      setError('Google로 로그인한 뒤 이용해 주세요.')
+      return
+    }
     if (!validateForm()) return
 
     const editingId = selectedId
@@ -158,7 +292,7 @@ function App() {
       } else {
         const { data, error: saveError } = await supabase
           .from('saju_readings')
-          .insert(readingPayload(text))
+          .insert(readingPayload(text, { includeUserId: true }))
           .select(READING_SELECT)
           .single()
 
@@ -185,6 +319,10 @@ function App() {
 
   // Update: 입력값·현재 결과만 저장 (재해석 없이)
   async function handleUpdateReading() {
+    if (!user) {
+      setError('Google로 로그인한 뒤 이용해 주세요.')
+      return
+    }
     if (!selectedId) {
       setError('수정할 사주를 사이드바에서 먼저 선택해 주세요.')
       return
@@ -228,6 +366,10 @@ function App() {
 
   // Delete
   async function handleDeleteReading() {
+    if (!user) {
+      setError('Google로 로그인한 뒤 이용해 주세요.')
+      return
+    }
     if (!selectedId) {
       setError('삭제할 사주를 사이드바에서 먼저 선택해 주세요.')
       return
@@ -268,10 +410,62 @@ function App() {
     .filter(Boolean)
 
   const isEditing = Boolean(selectedId)
+  const displayName =
+    user?.user_metadata?.full_name ||
+    user?.user_metadata?.name ||
+    user?.email ||
+    '사용자'
+
+  if (authLoading) {
+    return (
+      <div className="auth-screen" aria-busy="true">
+        <p className="auth-status">로그인 상태를 확인하는 중…</p>
+      </div>
+    )
+  }
+
+  if (!user) {
+    return (
+      <div className="auth-screen">
+        <header className="brand">
+          <h1 className="brand-mark">사주미</h1>
+          <p className="brand-line">나의 사주를, 조금 더 가까이</p>
+        </header>
+
+        <section className="auth-panel" aria-label="로그인">
+          <p className="auth-copy">Google 계정으로 로그인하면 내 사주만 안전하게 보관해요.</p>
+          <button
+            type="button"
+            className="google-btn"
+            onClick={handleGoogleLogin}
+            disabled={authBusy || !isSupabaseConfigured}
+          >
+            {authBusy ? 'Google로 이동 중…' : 'Google로 계속하기'}
+          </button>
+          {error && <p className="error">{error}</p>}
+          {notice && !error && <p className="notice">{notice}</p>}
+        </section>
+      </div>
+    )
+  }
 
   return (
     <div className="layout">
       <aside className="sidebar" aria-label="저장된 사주 목록">
+        <div className="sidebar-auth">
+          <p className="sidebar-user" title={user.email ?? displayName}>
+            {displayName}
+          </p>
+          <button
+            type="button"
+            className="logout-btn"
+            onClick={handleLogout}
+            disabled={authBusy}
+          >
+            {authBusy ? '처리 중…' : '로그아웃'}
+          </button>
+        </div>
+
         <p className="sidebar-title">저장된 사주</p>
         <button
           type="button"
