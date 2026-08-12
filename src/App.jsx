@@ -374,25 +374,28 @@ function App() {
                 : '사주 보기'}
           </button>
 
-          {isEditing && (
-            <div className="action-row">
-              <button
-                type="button"
-                className="secondary-btn"
-                onClick={handleUpdateReading}
-                disabled={loading || saving}
-              >
-                {saving ? '저장 중…' : '수정 저장'}
-              </button>
-              <button
-                type="button"
-                className="danger-btn"
-                onClick={handleDeleteReading}
-                disabled={loading || saving}
-              >
-                삭제
-              </button>
-            </div>
+          <div className="action-row">
+            <button
+              type="button"
+              className="secondary-btn"
+              onClick={handleUpdateReading}
+              disabled={!isEditing || loading || saving}
+            >
+              {saving ? '저장 중…' : '수정 저장'}
+            </button>
+            <button
+              type="button"
+              className="danger-btn"
+              onClick={handleDeleteReading}
+              disabled={!isEditing || loading || saving}
+            >
+              삭제
+            </button>
+          </div>
+          {!isEditing && (
+            <p className="action-hint">
+              사이드바에서 이름을 선택하면 수정·삭제가 가능해요.
+            </p>
           )}
         </section>
 

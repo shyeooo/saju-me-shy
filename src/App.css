@@ -277,8 +277,16 @@
 
 .secondary-btn:disabled,
 .danger-btn:disabled {
-  opacity: 0.6;
-  cursor: wait;
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.action-hint {
+  margin-top: -0.35rem;
+  font-size: 0.85rem;
+  color: var(--ink-soft);
+  line-height: 1.45;
 }
 
 .preview {
