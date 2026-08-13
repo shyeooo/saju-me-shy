@@ -4,8 +4,121 @@ import { getSajuReading } from './gemini'
 import { isSupabaseConfigured, supabase } from './supabase'
 import './App.css'
 
-const READING_SELECT =
-  'id, name, birth_date, birth_time, gender, calendar_type, result, created_at'
+const USER_SELECT =
+  'id, name, birth_date, birth_time, gender, calendar_type'
+const READING_SELECT = 'id, result, created_at'
+
+function formatBirthTime(value) {
+  return value ? String(value).slice(0, 5) : ''
+}
+
+function formatReadingLabel(createdAt) {
+  const date = new Date(createdAt)
+  if (Number.isNaN(date.getTime())) return '사주 해석'
+  return new Intl.DateTimeFormat('ko-KR', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  }).format(date)
+}
+
+function formatBirthDate(value) {
+  if (!value) return '—'
+  const date = new Date(`${value}T00:00:00`)
+  if (Number.isNaN(date.getTime())) return value
+  return new Intl.DateTimeFormat('ko-KR', {
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  }).format(date)
+}
+
+function isProfileComplete(row) {
+  return Boolean(row?.name && row?.birth_date && row?.gender && row?.calendar_type)
+}
+
+function ProfileFields({
+  name,
+  birthDate,
+  birthTime,
+  gender,
+  calendarType,
+  onNameChange,
+  onBirthDateChange,
+  onBirthTimeChange,
+  onGenderChange,
+  onCalendarTypeChange,
+}) {
+  return (
+    <>
+      <label className="field">
+        <span className="field-label">
+          이름 <span className="field-required">필수</span>
+        </span>
+        <input
+          type="text"
+          placeholder="예: 홍길동"
+          value={name}
+          onChange={(e) => onNameChange(e.target.value)}
+          autoComplete="name"
+        />
+      </label>
+
+      <label className="field">
+        <span className="field-label">
+          생년월일 <span className="field-required">필수</span>
+        </span>
+        <input
+          type="date"
+          value={birthDate}
+          onChange={(e) => onBirthDateChange(e.target.value)}
+        />
+      </label>
+
+      <label className="field">
+        <span className="field-label">태어난 시간</span>
+        <input
+          type="time"
+          value={birthTime}
+          onChange={(e) => onBirthTimeChange(e.target.value)}
+        />
+        <span className="field-hint">모르면 비워 두어도 돼요.</span>
+      </label>
+
+      <div className="row-2">
+        <label className="field">
+          <span className="field-label">
+            성별 <span className="field-required">필수</span>
+          </span>
+          <select
+            value={gender}
+            onChange={(e) => onGenderChange(e.target.value)}
+          >
+            <option value="">선택</option>
+            <option value="남">남</option>
+            <option value="여">여</option>
+          </select>
+        </label>
+
+        <label className="field">
+          <span className="field-label">
+            양력 / 음력 <span className="field-required">필수</span>
+          </span>
+          <select
+            value={calendarType}
+            onChange={(e) => onCalendarTypeChange(e.target.value)}
+          >
+            <option value="">선택</option>
+            <option value="양력">양력</option>
+            <option value="음력">음력</option>
+          </select>
+        </label>
+      </div>
+    </>
+  )
+}
 
 function App() {
   // 인증
@@ -32,22 +145,87 @@ function App() {
   // 저장된 사주 목록 (사이드바) — Read
   const [readings, setReadings] = useState([])
   const [selectedId, setSelectedId] = useState(null)
+  const [profile, setProfile] = useState(null)
+  const [profileReady, setProfileReady] = useState(false)
+  const [view, setView] = useState('saju')
+
+  function applyProfile(row) {
+    setName(row?.name ?? '')
+    setBirthDate(row?.birth_date ?? '')
+    setBirthTime(formatBirthTime(row?.birth_time))
+    setGender(row?.gender ?? '')
+    setCalendarType(row?.calendar_type ?? '')
+  }
+
+  function prefillNameFromGoogle() {
+    const googleName =
+      user?.user_metadata?.full_name || user?.user_metadata?.name || ''
+    if (googleName) setName(googleName)
+  }
 
   function readingPayload(resultText, { includeUserId = false } = {}) {
-    const payload = {
-      name,
-      birth_date: birthDate,
-      birth_time: birthTime || null,
-      gender,
-      calendar_type: calendarType,
-      result: resultText,
-    }
+    const payload = { result: resultText }
 
     if (includeUserId && user?.id) {
       payload.user_id = user.id
     }
 
     return payload
+  }
+
+  async function loadProfile(userId) {
+    if (!supabase || !userId) {
+      setProfileReady(true)
+      return
+    }
+
+    const { data, error: fetchError } = await supabase
+      .from('users')
+      .select(USER_SELECT)
+      .eq('id', userId)
+      .maybeSingle()
+
+    if (fetchError) {
+      console.error(fetchError)
+      setError('저장된 내 정보를 불러오지 못했습니다.')
+      setProfileReady(true)
+      return
+    }
+
+    setProfile(data)
+    applyProfile(data)
+    if (!data?.name) prefillNameFromGoogle()
+    setProfileReady(true)
+  }
+
+  async function saveProfile() {
+    if (!supabase || !user?.id) {
+      throw new Error('로그인 정보가 없습니다.')
+    }
+
+    const payload = {
+      id: user.id,
+      name,
+      birth_date: birthDate,
+      birth_time: birthTime || null,
+      gender,
+      calendar_type: calendarType,
+    }
+
+    const { data, error: upsertError } = await supabase
+      .from('users')
+      .upsert(payload, { onConflict: 'id' })
+      .select(USER_SELECT)
+      .single()
+
+    if (upsertError) {
+      console.error(upsertError)
+      throw upsertError
+    }
+
+    setProfile(data)
+    applyProfile(data)
+    return data
   }
 
   async function loadReadings() {
@@ -131,6 +309,9 @@ function App() {
       if (event === 'SIGNED_OUT') {
         setReadings([])
         setSelectedId(null)
+        setProfile(null)
+        setProfileReady(false)
+        setView('saju')
       }
     })
 
@@ -144,17 +325,33 @@ function App() {
     if (!user) {
       setReadings([])
       setSelectedId(null)
+      setProfile(null)
+      setProfileReady(false)
+      setView('saju')
+      applyProfile(null)
       return
     }
+    setProfileReady(false)
+    loadProfile(user.id)
     loadReadings()
-  }, [user])
+  }, [user?.id])
 
-  // 로딩이 시작되면 스켈레톤 영역이 보이도록 스크롤합니다.
+  const needsOnboarding = Boolean(user && profileReady && !isProfileComplete(profile))
+
   useEffect(() => {
     if (loading) {
       skeletonRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     }
   }, [loading])
+
+  useEffect(() => {
+    if (!needsOnboarding) return undefined
+    const previous = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.body.style.overflow = previous
+    }
+  }, [needsOnboarding])
 
   async function handleGoogleLogin() {
     if (!supabase) {
@@ -204,12 +401,9 @@ function App() {
   }
 
   function handleSelectReading(reading) {
+    setView('saju')
     setSelectedId(reading.id)
-    setName(reading.name ?? '')
-    setBirthDate(reading.birth_date ?? '')
-    setBirthTime(reading.birth_time ? String(reading.birth_time).slice(0, 5) : '')
-    setGender(reading.gender ?? '')
-    setCalendarType(reading.calendar_type ?? '')
+    applyProfile(profile)
     setResult(reading.result ?? '')
     setError('')
     setNotice('')
@@ -220,21 +414,77 @@ function App() {
   }
 
   function handleNewSaju() {
+    setView('saju')
     setSelectedId(null)
-    setName('')
-    setBirthDate('')
-    setBirthTime('')
-    setGender('')
-    setCalendarType('')
+    applyProfile(profile)
     setResult('')
     setError('')
     setNotice('')
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
-  function validateForm() {
+  function openProfile() {
+    applyProfile(profile)
+    if (!profile?.name) prefillNameFromGoogle()
+    setView('profile')
+    setError('')
+    setNotice('')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  function closeProfile() {
+    applyProfile(profile)
+    setView('saju')
+    setError('')
+  }
+
+  function getProfileValidationError() {
     if (!name || !birthDate || !gender || !calendarType) {
-      setError('이름, 생년월일, 성별, 양력/음력은 꼭 입력해 주세요.')
+      return '이름, 생년월일, 성별, 양력/음력은 꼭 입력해 주세요.'
+    }
+    return ''
+  }
+
+  async function handleSaveProfile(event) {
+    event?.preventDefault()
+
+    const message = getProfileValidationError()
+    if (message) {
+      setError(message)
+      setNotice('')
+      return
+    }
+    if (!supabase) {
+      setError('Supabase가 설정되지 않아 저장할 수 없습니다.')
+      return
+    }
+
+    const completingOnboarding = !isProfileComplete(profile)
+    setSaving(true)
+    setError('')
+    setNotice('')
+
+    try {
+      await saveProfile()
+      setView('saju')
+      setNotice(
+        completingOnboarding
+          ? '내 정보를 저장했어요. 이제 사주를 볼 수 있어요.'
+          : '프로필을 저장했어요.',
+      )
+    } catch (profileError) {
+      console.error(profileError)
+      setError('내 정보 저장에 실패했습니다.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  function validateProfileForSaju() {
+    const message = getProfileValidationError()
+    if (message) {
+      setError(message)
+      openProfile()
       return false
     }
     return true
@@ -246,7 +496,7 @@ function App() {
       setError('Google로 로그인한 뒤 이용해 주세요.')
       return
     }
-    if (!validateForm()) return
+    if (!validateProfileForSaju()) return
 
     const editingId = selectedId
     setLoading(true)
@@ -317,7 +567,7 @@ function App() {
     }
   }
 
-  // Update: 입력값·현재 결과만 저장 (재해석 없이)
+  // Update: 현재 결과만 저장 (재해석 없이)
   async function handleUpdateReading() {
     if (!user) {
       setError('Google로 로그인한 뒤 이용해 주세요.')
@@ -327,7 +577,6 @@ function App() {
       setError('수정할 사주를 사이드바에서 먼저 선택해 주세요.')
       return
     }
-    if (!validateForm()) return
     if (!result) {
       setError('저장할 사주 결과가 없습니다. 먼저 사주 보기를 해 주세요.')
       return
@@ -360,7 +609,7 @@ function App() {
       setReadings((prev) =>
         prev.map((item) => (item.id === data.id ? data : item)),
       )
-      setNotice('수정 내용을 저장했어요.')
+      setNotice('사주 해석을 저장했어요.')
     }
   }
 
@@ -379,7 +628,9 @@ function App() {
       return
     }
 
-    const ok = window.confirm(`「${name || '이 사주'}」를 삭제할까요?`)
+    const ok = window.confirm(
+      '이 사주 해석을 삭제할까요? 프로필 정보는 그대로 남아 있어요.',
+    )
     if (!ok) return
 
     setSaving(true)
@@ -411,15 +662,32 @@ function App() {
 
   const isEditing = Boolean(selectedId)
   const displayName =
+    profile?.name ||
     user?.user_metadata?.full_name ||
     user?.user_metadata?.name ||
     user?.email ||
     '사용자'
+  const profileFields = {
+    name,
+    birthDate,
+    birthTime,
+    gender,
+    calendarType,
+    onNameChange: setName,
+    onBirthDateChange: setBirthDate,
+    onBirthTimeChange: setBirthTime,
+    onGenderChange: setGender,
+    onCalendarTypeChange: setCalendarType,
+  }
 
-  if (authLoading) {
+  if (authLoading || (user && !profileReady)) {
     return (
       <div className="auth-screen" aria-busy="true">
-        <p className="auth-status">로그인 상태를 확인하는 중…</p>
+        <p className="auth-status">
+          {authLoading
+            ? '로그인 상태를 확인하는 중…'
+            : '내 정보를 확인하는 중…'}
+        </p>
       </div>
     )
   }
@@ -451,11 +719,19 @@ function App() {
 
   return (
     <div className="layout">
-      <aside className="sidebar" aria-label="저장된 사주 목록">
+      <aside className="sidebar" aria-label="저장된 사주 목록" inert={needsOnboarding || undefined}>
         <div className="sidebar-auth">
           <p className="sidebar-user" title={user.email ?? displayName}>
             {displayName}
           </p>
+          <button
+            type="button"
+            className={view === 'profile' ? 'profile-nav-btn is-active' : 'profile-nav-btn'}
+            onClick={openProfile}
+            disabled={needsOnboarding}
+          >
+            프로필
+          </button>
           <button
             type="button"
             className="logout-btn"
@@ -483,13 +759,16 @@ function App() {
                 <button
                   type="button"
                   className={
-                    selectedId === reading.id
+                    selectedId === reading.id && view === 'saju'
                       ? 'sidebar-item is-active'
                       : 'sidebar-item'
                   }
                   onClick={() => handleSelectReading(reading)}
                 >
-                  {reading.name}
+                  <span className="sidebar-item-date">
+                    {formatReadingLabel(reading.created_at)}
+                  </span>
+                  <span className="sidebar-item-label">사주 해석</span>
                 </button>
               </li>
             ))}
@@ -497,167 +776,218 @@ function App() {
         )}
       </aside>
 
-      <main className="app">
+      <main className="app" inert={needsOnboarding || undefined}>
         <header className="brand">
           <h1 className="brand-mark">사주미</h1>
           <p className="brand-line">나의 사주를, 조금 더 가까이</p>
         </header>
 
-        <section className="form-panel" aria-label="사주 정보 입력">
-          <label className="field">
-            이름
-            <input
-              type="text"
-              placeholder="예: 홍길동"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </label>
-
-          <label className="field">
-            생년월일
-            <input
-              type="date"
-              value={birthDate}
-              onChange={(e) => setBirthDate(e.target.value)}
-            />
-          </label>
-
-          <label className="field">
-            태어난 시간
-            <input
-              type="time"
-              value={birthTime}
-              onChange={(e) => setBirthTime(e.target.value)}
-            />
-          </label>
-
-          <div className="row-2">
-            <label className="field">
-              성별
-              <select value={gender} onChange={(e) => setGender(e.target.value)}>
-                <option value="">선택</option>
-                <option value="남">남</option>
-                <option value="여">여</option>
-              </select>
-            </label>
-
-            <label className="field">
-              양력 / 음력
-              <select
-                value={calendarType}
-                onChange={(e) => setCalendarType(e.target.value)}
-              >
-                <option value="">선택</option>
-                <option value="양력">양력</option>
-                <option value="음력">음력</option>
-              </select>
-            </label>
-          </div>
-
-          <button
-            type="button"
-            className="submit-btn"
-            onClick={handleGetSaju}
-            disabled={loading || saving}
-          >
-            {loading
-              ? '사주를 읽는 중…'
-              : isEditing
-                ? '다시 해석하고 수정'
-                : '사주 보기'}
-          </button>
-
-          <div className="action-row">
-            <button
-              type="button"
-              className="secondary-btn"
-              onClick={handleUpdateReading}
-              disabled={!isEditing || loading || saving}
-            >
-              {saving ? '저장 중…' : '수정 저장'}
-            </button>
-            <button
-              type="button"
-              className="danger-btn"
-              onClick={handleDeleteReading}
-              disabled={!isEditing || loading || saving}
-            >
-              삭제
-            </button>
-          </div>
-          {!isEditing && (
-            <p className="action-hint">
-              사이드바에서 이름을 선택하면 수정·삭제가 가능해요.
-            </p>
-          )}
-        </section>
-
-        <div className="preview">
-          <p className="preview-title">{name || '○○'}님의 사주</p>
-          <p>생년월일: {birthDate || '—'}</p>
-          <p>태어난 시간: {birthTime || '—'}</p>
-          <p>성별: {gender || '—'}</p>
-          <p>양력/음력: {calendarType || '—'}</p>
-        </div>
-
-        {error && <p className="error">{error}</p>}
-        {notice && !error && <p className="notice">{notice}</p>}
-
-        {loading && (
-          <section
-            ref={skeletonRef}
-            className="result skeleton-result"
-            aria-busy="true"
-            aria-live="polite"
-          >
-            <p className="skeleton-status">사주 명식을 세우는 중…</p>
-            <div className="skeleton-line skeleton-title" />
-            <div className="skeleton-block">
-              <div className="skeleton-line w-95" />
-              <div className="skeleton-line w-88" />
-              <div className="skeleton-line w-92" />
-              <div className="skeleton-line w-70" />
-            </div>
-            <div className="skeleton-block">
-              <div className="skeleton-line w-90" />
-              <div className="skeleton-line w-96" />
-              <div className="skeleton-line w-80" />
-              <div className="skeleton-line w-60" />
-            </div>
-            <div className="skeleton-block">
-              <div className="skeleton-line w-85" />
-              <div className="skeleton-line w-75" />
-            </div>
-          </section>
-        )}
-
-        {!loading && result && (
-          <section
-            ref={resultRef}
-            key={selectedId ?? 'new-result'}
-            className="result"
-            aria-live="polite"
-          >
-            <p className="result-label">사주 해석</p>
-            <h2>{name}님의 이야기</h2>
-            {(birthDate || gender || calendarType) && (
-              <p className="result-meta">
-                {[birthDate, birthTime || null, gender, calendarType]
-                  .filter(Boolean)
-                  .join(' · ')}
+        {view === 'profile' ? (
+          <section className="form-panel" aria-label="프로필 수정">
+            <div className="section-heading">
+              <p className="section-kicker">프로필</p>
+              <h2 className="section-title">내 사주 정보</h2>
+              <p className="action-hint">
+                여기서 바꾼 내용은 앞으로 보는 모든 사주에 반영돼요.
               </p>
-            )}
-            <div className="result-body">
-              {resultParagraphs.map((paragraph, index) => (
-                <p key={`${selectedId ?? 'new'}-${index}`} className="result-text">
-                  {paragraph}
-                </p>
-              ))}
             </div>
+
+            <form className="profile-form" onSubmit={handleSaveProfile}>
+              <ProfileFields {...profileFields} />
+              {error && <p className="error">{error}</p>}
+              {notice && !error && <p className="notice">{notice}</p>}
+              <button
+                type="submit"
+                className="submit-btn"
+                disabled={saving || loading}
+              >
+                {saving ? '저장 중…' : '프로필 저장'}
+              </button>
+              <button
+                type="button"
+                className="secondary-btn"
+                onClick={closeProfile}
+                disabled={saving}
+              >
+                사주 화면으로
+              </button>
+            </form>
           </section>
+        ) : (
+          <>
+            <section className="profile-card" aria-label="내 사주 정보">
+              <div className="profile-card-top">
+                <div>
+                  <p className="section-kicker">내 정보</p>
+                  <h2 className="profile-card-name">{name || '○○'}님</h2>
+                </div>
+                <button
+                  type="button"
+                  className="profile-edit-btn"
+                  onClick={openProfile}
+                >
+                  프로필 수정
+                </button>
+              </div>
+              <dl className="profile-meta">
+                <div>
+                  <dt>생년월일</dt>
+                  <dd>{formatBirthDate(birthDate)}</dd>
+                </div>
+                <div>
+                  <dt>태어난 시간</dt>
+                  <dd>{birthTime || '모름'}</dd>
+                </div>
+                <div>
+                  <dt>성별</dt>
+                  <dd>{gender || '—'}</dd>
+                </div>
+                <div>
+                  <dt>양력 / 음력</dt>
+                  <dd>{calendarType || '—'}</dd>
+                </div>
+              </dl>
+            </section>
+
+            <section className="saju-actions" aria-label="사주 보기">
+              <button
+                type="button"
+                className="submit-btn"
+                onClick={handleGetSaju}
+                disabled={loading || saving}
+              >
+                {loading
+                  ? '사주를 읽는 중…'
+                  : isEditing
+                    ? '다시 해석하고 수정'
+                    : '사주 보기'}
+              </button>
+
+              <div className="action-row">
+                <button
+                  type="button"
+                  className="secondary-btn"
+                  onClick={handleUpdateReading}
+                  disabled={!isEditing || loading || saving}
+                >
+                  {saving ? '저장 중…' : '수정 저장'}
+                </button>
+                <button
+                  type="button"
+                  className="danger-btn"
+                  onClick={handleDeleteReading}
+                  disabled={!isEditing || loading || saving}
+                >
+                  삭제
+                </button>
+              </div>
+              {!isEditing && (
+                <p className="action-hint">
+                  사이드바에서 날짜를 선택하면 이전 해석을 수정·삭제할 수 있어요.
+                  생년월일을 바꾸려면 프로필에서 수정해 주세요.
+                </p>
+              )}
+            </section>
+
+            {error && <p className="error">{error}</p>}
+            {notice && !error && <p className="notice">{notice}</p>}
+
+            {loading && (
+              <section
+                ref={skeletonRef}
+                className="result skeleton-result"
+                aria-busy="true"
+                aria-live="polite"
+              >
+                <p className="skeleton-status">사주 명식을 세우는 중…</p>
+                <div className="skeleton-line skeleton-title" />
+                <div className="skeleton-block">
+                  <div className="skeleton-line w-95" />
+                  <div className="skeleton-line w-88" />
+                  <div className="skeleton-line w-92" />
+                  <div className="skeleton-line w-70" />
+                </div>
+                <div className="skeleton-block">
+                  <div className="skeleton-line w-90" />
+                  <div className="skeleton-line w-96" />
+                  <div className="skeleton-line w-80" />
+                  <div className="skeleton-line w-60" />
+                </div>
+                <div className="skeleton-block">
+                  <div className="skeleton-line w-85" />
+                  <div className="skeleton-line w-75" />
+                </div>
+              </section>
+            )}
+
+            {!loading && result && (
+              <section
+                ref={resultRef}
+                key={selectedId ?? 'new-result'}
+                className="result"
+                aria-live="polite"
+              >
+                <p className="result-label">사주 해석</p>
+                <h2>{name}님의 이야기</h2>
+                {(birthDate || gender || calendarType) && (
+                  <p className="result-meta">
+                    {[birthDate, birthTime || null, gender, calendarType]
+                      .filter(Boolean)
+                      .join(' · ')}
+                  </p>
+                )}
+                <div className="result-body">
+                  {resultParagraphs.map((paragraph, index) => (
+                    <p
+                      key={`${selectedId ?? 'new'}-${index}`}
+                      className="result-text"
+                    >
+                      {paragraph}
+                    </p>
+                  ))}
+                </div>
+              </section>
+            )}
+          </>
         )}
       </main>
+
+      {needsOnboarding && (
+        <div className="modal-backdrop">
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="onboarding-title"
+            aria-describedby="onboarding-copy"
+          >
+            <p className="section-kicker">처음 오신 걸 환영해요</p>
+            <h2 id="onboarding-title">내 정보를 알려 주세요</h2>
+            <p id="onboarding-copy" className="modal-copy">
+              사주를 보기 위해 한 번만 입력하면 되고, 나중에 프로필에서 언제든 수정할 수 있어요.
+            </p>
+            <form className="profile-form" onSubmit={handleSaveProfile}>
+              <ProfileFields {...profileFields} />
+              {error && <p className="error">{error}</p>}
+              <button
+                type="submit"
+                className="submit-btn"
+                disabled={saving}
+              >
+                {saving ? '저장 중…' : '저장하고 시작하기'}
+              </button>
+              <button
+                type="button"
+                className="modal-logout"
+                onClick={handleLogout}
+                disabled={authBusy || saving}
+              >
+                다른 계정으로 로그인
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
