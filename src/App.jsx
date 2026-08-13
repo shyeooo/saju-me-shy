@@ -1,12 +1,72 @@
 // useState: React에서 변하는 값(상태)을 기억하고 화면을 다시 그리게 해주는 기능
 import { useEffect, useRef, useState } from 'react'
 import { getSajuReading } from './gemini'
+import { ResultMascot, ResultView } from './ResultView'
+import { getShareUrl, shareReadingLink } from './share'
 import { isSupabaseConfigured, supabase } from './supabase'
 import './App.css'
 
 const USER_SELECT =
   'id, name, birth_date, birth_time, gender, calendar_type'
 const READING_SELECT = 'id, result, created_at'
+const GUEST_DRAFT_KEY = 'sajume-guest-draft'
+
+let guestConsumeStarted = false
+let pendingGuestConsume = null
+
+function readGuestDraft() {
+  try {
+    const raw = window.localStorage.getItem(GUEST_DRAFT_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function writeGuestDraft(draft) {
+  try {
+    window.localStorage.setItem(GUEST_DRAFT_KEY, JSON.stringify(draft))
+  } catch {
+    // private mode / quota
+  }
+}
+
+function clearGuestDraft() {
+  try {
+    window.localStorage.removeItem(GUEST_DRAFT_KEY)
+  } catch {
+    // ignore
+  }
+}
+
+function takeGuestDraft() {
+  if (pendingGuestConsume) return pendingGuestConsume
+  const draft = readGuestDraft()
+  if (!draft) return null
+  pendingGuestConsume = draft
+  clearGuestDraft()
+  return draft
+}
+
+function guestDraftFromFields({
+  name,
+  birthDate,
+  birthTime,
+  gender,
+  calendarType,
+  result,
+}) {
+  return {
+    name,
+    birthDate,
+    birthTime,
+    gender,
+    calendarType,
+    result: result ?? '',
+  }
+}
 
 function formatBirthTime(value) {
   return value ? String(value).slice(0, 5) : ''
@@ -33,19 +93,6 @@ function formatBirthDate(value) {
     month: 'long',
     day: 'numeric',
   }).format(date)
-}
-
-function ResultMascot() {
-  return (
-    <img
-      className="result-mascot"
-      src="/images/mascot.png"
-      alt="사주미 치즈고양이"
-      width="345"
-      height="399"
-      decoding="async"
-    />
-  )
 }
 
 function isProfileComplete(row) {
@@ -140,14 +187,18 @@ function App() {
   const [authBusy, setAuthBusy] = useState(false)
 
   // 입력 값들
-  const [name, setName] = useState('')
-  const [birthDate, setBirthDate] = useState('')
-  const [birthTime, setBirthTime] = useState('')
-  const [gender, setGender] = useState('')
-  const [calendarType, setCalendarType] = useState('')
+  const [name, setName] = useState(() => readGuestDraft()?.name ?? '')
+  const [birthDate, setBirthDate] = useState(() => readGuestDraft()?.birthDate ?? '')
+  const [birthTime, setBirthTime] = useState(() =>
+    formatBirthTime(readGuestDraft()?.birthTime),
+  )
+  const [gender, setGender] = useState(() => readGuestDraft()?.gender ?? '')
+  const [calendarType, setCalendarType] = useState(
+    () => readGuestDraft()?.calendarType ?? '',
+  )
 
   // Gemini 결과 관련 상태
-  const [result, setResult] = useState('')
+  const [result, setResult] = useState(() => readGuestDraft()?.result ?? '')
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
@@ -156,6 +207,7 @@ function App() {
   const resultRef = useRef(null)
   const toastTimerRef = useRef(null)
   const [toast, setToast] = useState(null)
+  const [shareBusy, setShareBusy] = useState(false)
 
   // 저장된 사주 목록 (사이드바) — Read
   const [readings, setReadings] = useState([])
@@ -163,6 +215,7 @@ function App() {
   const [profile, setProfile] = useState(null)
   const [profileReady, setProfileReady] = useState(false)
   const [view, setView] = useState('saju')
+  const [readingCount, setReadingCount] = useState(null)
 
   function applyProfile(row) {
     setName(row?.name ?? '')
@@ -179,7 +232,14 @@ function App() {
   }
 
   function readingPayload(resultText, { includeUserId = false } = {}) {
-    const payload = { result: resultText }
+    const payload = {
+      result: resultText,
+      name,
+      birth_date: birthDate || null,
+      birth_time: birthTime || null,
+      gender: gender || null,
+      calendar_type: calendarType || null,
+    }
 
     if (includeUserId && user?.id) {
       payload.user_id = user.id
@@ -207,9 +267,27 @@ function App() {
       return
     }
 
-    setProfile(data)
-    applyProfile(data)
-    if (!data?.name) prefillNameFromGoogle()
+    const draft = pendingGuestConsume || readGuestDraft()
+    const draftProfile = {
+      name: draft?.name,
+      birth_date: draft?.birthDate,
+      birth_time: draft?.birthTime,
+      gender: draft?.gender,
+      calendar_type: draft?.calendarType,
+    }
+    const keepDraft =
+      Boolean(draft?.result) ||
+      (isProfileComplete(draftProfile) && !isProfileComplete(data))
+
+    if (keepDraft) {
+      setProfile(data)
+      applyProfile(draftProfile)
+      if (draft?.result) setResult(draft.result)
+    } else {
+      setProfile(data)
+      applyProfile(data)
+      if (!data?.name) prefillNameFromGoogle()
+    }
     setProfileReady(true)
   }
 
@@ -322,11 +400,16 @@ function App() {
       }
 
       if (event === 'SIGNED_OUT') {
+        guestConsumeStarted = false
+        pendingGuestConsume = null
+        clearGuestDraft()
         setReadings([])
         setSelectedId(null)
         setProfile(null)
         setProfileReady(false)
         setView('saju')
+        setResult('')
+        applyProfile(null)
       }
     })
 
@@ -337,21 +420,138 @@ function App() {
   }, [])
 
   useEffect(() => {
+    if (!supabase) return undefined
+
+    let mounted = true
+
+    supabase.rpc('get_reading_count').then(({ data, error: countError }) => {
+      if (!mounted) return
+      if (countError) {
+        console.error(countError)
+        return
+      }
+      const n = Number(data)
+      if (Number.isFinite(n) && n > 0) setReadingCount(n)
+    })
+
+    return () => {
+      mounted = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (authLoading) return
+
     if (!user) {
       setReadings([])
       setSelectedId(null)
       setProfile(null)
       setProfileReady(false)
       setView('saju')
-      applyProfile(null)
+      const draft = readGuestDraft()
+      if (draft) {
+        applyProfile({
+          name: draft.name,
+          birth_date: draft.birthDate,
+          birth_time: draft.birthTime,
+          gender: draft.gender,
+          calendar_type: draft.calendarType,
+        })
+        if (draft.result) setResult(draft.result)
+      }
       return
     }
     setProfileReady(false)
     loadProfile(user.id)
     loadReadings()
-  }, [user?.id])
+  }, [user?.id, authLoading])
 
-  const needsOnboarding = Boolean(user && profileReady && !isProfileComplete(profile))
+  const formComplete = Boolean(name && birthDate && gender && calendarType)
+  const needsOnboarding = Boolean(
+    user && profileReady && !isProfileComplete(profile) && !formComplete,
+  )
+
+  useEffect(() => {
+    if (!user || !profileReady || guestConsumeStarted) return
+
+    const draft = takeGuestDraft()
+    if (!draft) return
+
+    const draftComplete = isProfileComplete({
+      name: draft.name,
+      birth_date: draft.birthDate,
+      gender: draft.gender,
+      calendar_type: draft.calendarType,
+    })
+    const shouldSaveProfile = draftComplete && !isProfileComplete(profile)
+    if (!shouldSaveProfile && !draft.result) {
+      pendingGuestConsume = null
+      return
+    }
+
+    guestConsumeStarted = true
+
+    ;(async () => {
+      try {
+        if (shouldSaveProfile && supabase) {
+          const { data, error: upsertError } = await supabase
+            .from('users')
+            .upsert(
+              {
+                id: user.id,
+                name: draft.name,
+                birth_date: draft.birthDate,
+                birth_time: draft.birthTime || null,
+                gender: draft.gender,
+                calendar_type: draft.calendarType,
+              },
+              { onConflict: 'id' },
+            )
+            .select(USER_SELECT)
+            .single()
+
+          if (upsertError) throw upsertError
+          if (data) {
+            setProfile(data)
+            applyProfile(data)
+          }
+        }
+
+        if (draft.result && supabase) {
+          const { data, error: saveError } = await supabase
+            .from('saju_readings')
+            .insert({
+              result: draft.result,
+              name: draft.name,
+              birth_date: draft.birthDate || null,
+              birth_time: draft.birthTime || null,
+              gender: draft.gender || null,
+              calendar_type: draft.calendarType || null,
+              user_id: user.id,
+            })
+            .select(READING_SELECT)
+            .single()
+
+          if (saveError) throw saveError
+          if (data) {
+            setReadings((prev) => [data, ...prev])
+            setSelectedId(data.id)
+            setResult(draft.result)
+            setView('saju')
+            setNotice('로그인했어요. 전체 사주 해석을 열어 두었어요.')
+          }
+        }
+
+        pendingGuestConsume = null
+      } catch (consumeError) {
+        console.error(consumeError)
+        writeGuestDraft(draft)
+        pendingGuestConsume = null
+        guestConsumeStarted = false
+        setError('로그인은 됐지만 결과를 저장하지 못했습니다. 잠시 후 다시 시도해 주세요.')
+      }
+    })()
+  }, [user?.id, profileReady])
 
   useEffect(() => {
     if (loading) {
@@ -395,6 +595,16 @@ function App() {
     setAuthBusy(true)
     setError('')
     setNotice('')
+    writeGuestDraft(
+      guestDraftFromFields({
+        name,
+        birthDate,
+        birthTime,
+        gender,
+        calendarType,
+        result,
+      }),
+    )
 
     const { error: oauthError } = await supabase.auth.signInWithOAuth({
       provider: 'google',
@@ -429,6 +639,9 @@ function App() {
       return
     }
 
+    guestConsumeStarted = false
+    pendingGuestConsume = null
+    clearGuestDraft()
     handleNewSaju()
     setNotice('로그아웃했어요.')
   }
@@ -460,6 +673,23 @@ function App() {
     setResult('')
     setError('')
     setNotice('')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  function handleEditGuestInfo() {
+    setResult('')
+    setError('')
+    setNotice('')
+    writeGuestDraft(
+      guestDraftFromFields({
+        name,
+        birthDate,
+        birthTime,
+        gender,
+        calendarType,
+        result: '',
+      }),
+    )
     window.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
@@ -524,7 +754,7 @@ function App() {
     const message = getProfileValidationError()
     if (message) {
       setError(message)
-      openProfile()
+      if (user) openProfile()
       return false
     }
     return true
@@ -532,13 +762,9 @@ function App() {
 
   // Create / Update(재해석): 사주 보기
   async function handleGetSaju() {
-    if (!user) {
-      setError('Google로 로그인한 뒤 이용해 주세요.')
-      return
-    }
     if (!validateProfileForSaju()) return
 
-    const editingId = selectedId
+    const editingId = user ? selectedId : null
     setLoading(true)
     setError('')
     setNotice('')
@@ -553,6 +779,21 @@ function App() {
         calendarType,
       })
       setResult(text)
+
+      if (!user) {
+        writeGuestDraft(
+          guestDraftFromFields({
+            name,
+            birthDate,
+            birthTime,
+            gender,
+            calendarType,
+            result: text,
+          }),
+        )
+        setNotice('앞부분만 먼저 보여 드려요. 나머지 이야기는 로그인하면 열려요.')
+        return
+      }
 
       if (!supabase) {
         setError(
@@ -695,10 +936,32 @@ function App() {
     setNotice('사주를 삭제했어요.')
   }
 
-  const resultParagraphs = result
-    .split(/\n+/)
-    .map((part) => part.trim())
-    .filter(Boolean)
+  async function handleShare() {
+    if (!selectedId) {
+      showToast('저장이 끝난 뒤 공유할 수 있어요.')
+      return
+    }
+
+    const shareName = name || '친구'
+    setShareBusy(true)
+
+    try {
+      const outcome = await shareReadingLink({
+        url: getShareUrl(selectedId),
+        title: `${shareName}님의 사주 해석 | 사주미`,
+        text: `${shareName}님의 사주 이야기를 확인해 보세요.`,
+      })
+
+      if (outcome === 'copied' || outcome === 'prompted') {
+        showToast('공유 링크를 복사했어요.')
+      }
+    } catch (shareError) {
+      console.error(shareError)
+      showToast('공유에 실패했어요. 잠시 후 다시 시도해 주세요.')
+    } finally {
+      setShareBusy(false)
+    }
+  }
 
   const isEditing = Boolean(selectedId)
   const isNewSajuPage = view === 'saju' && !selectedId
@@ -721,7 +984,7 @@ function App() {
     onCalendarTypeChange: setCalendarType,
   }
 
-  if (authLoading || (user && !profileReady)) {
+  if (authLoading || (user && !profileReady && !result && !formComplete)) {
     return (
       <div className="auth-screen" aria-busy="true">
         <p className="auth-status">
@@ -733,33 +996,9 @@ function App() {
     )
   }
 
-  if (!user) {
-    return (
-      <div className="auth-screen">
-        <header className="brand">
-          <h1 className="brand-mark">사주미</h1>
-          <p className="brand-line">나의 사주를, 조금 더 가까이</p>
-        </header>
-
-        <section className="auth-panel" aria-label="로그인">
-          <p className="auth-copy">Google 계정으로 로그인하면 내 사주만 안전하게 보관해요.</p>
-          <button
-            type="button"
-            className="google-btn"
-            onClick={handleGoogleLogin}
-            disabled={authBusy || !isSupabaseConfigured}
-          >
-            {authBusy ? 'Google로 이동 중…' : 'Google로 계속하기'}
-          </button>
-          {error && <p className="error">{error}</p>}
-          {notice && !error && <p className="notice">{notice}</p>}
-        </section>
-      </div>
-    )
-  }
-
   return (
-    <div className="layout">
+    <div className={user ? 'layout' : 'layout is-guest'}>
+      {user && (
       <aside className="sidebar" aria-label="저장된 사주 목록" inert={needsOnboarding || undefined}>
         <div className="sidebar-auth">
           <p className="sidebar-user" title={user.email ?? displayName}>
@@ -816,14 +1055,25 @@ function App() {
           </ul>
         )}
       </aside>
+      )}
 
       <main className="app" inert={needsOnboarding || undefined}>
         <header className="brand">
           <h1 className="brand-mark">사주미</h1>
           <p className="brand-line">나의 사주를, 조금 더 가까이</p>
+          {!user && (
+            <button
+              type="button"
+              className="guest-login-btn"
+              onClick={handleGoogleLogin}
+              disabled={authBusy || !isSupabaseConfigured}
+            >
+              {authBusy ? '이동 중…' : '이미 계정이 있나요? 로그인'}
+            </button>
+          )}
         </header>
 
-        {view === 'profile' ? (
+        {view === 'profile' && user ? (
           <section className="form-panel" aria-label="프로필 수정">
             <div className="section-heading">
               <p className="section-kicker">프로필</p>
@@ -856,6 +1106,7 @@ function App() {
           </section>
         ) : (
           <>
+            {user ? (
             <section className="profile-card" aria-label="내 사주 정보">
               <div className="profile-card-top">
                 <div>
@@ -889,7 +1140,56 @@ function App() {
                 </div>
               </dl>
             </section>
+            ) : result && !loading ? (
+            <section className="profile-card" aria-label="입력한 사주 정보">
+              <div className="profile-card-top">
+                <div>
+                  <p className="section-kicker">입력한 정보</p>
+                  <h2 className="profile-card-name">{name || '○○'}님</h2>
+                </div>
+                <button
+                  type="button"
+                  className="profile-edit-btn"
+                  onClick={handleEditGuestInfo}
+                >
+                  정보 수정
+                </button>
+              </div>
+              <dl className="profile-meta">
+                <div>
+                  <dt>생년월일</dt>
+                  <dd>{formatBirthDate(birthDate)}</dd>
+                </div>
+                <div>
+                  <dt>태어난 시간</dt>
+                  <dd>{birthTime || '모름'}</dd>
+                </div>
+                <div>
+                  <dt>성별</dt>
+                  <dd>{gender || '—'}</dd>
+                </div>
+                <div>
+                  <dt>양력 / 음력</dt>
+                  <dd>{calendarType || '—'}</dd>
+                </div>
+              </dl>
+            </section>
+            ) : (
+            <section className="form-panel" aria-label="사주 정보">
+              <div className="section-heading">
+                <p className="section-kicker">바로 보기</p>
+                <h2 className="section-title">내 사주 정보</h2>
+                <p className="action-hint">
+                  로그인 없이 바로 볼 수 있어요. 전체 해석은 결과에서 열어 드려요.
+                </p>
+              </div>
+              <div className="profile-form">
+                <ProfileFields {...profileFields} />
+              </div>
+            </section>
+            )}
 
+            {(user || !result || loading) && (
             <section className="saju-actions" aria-label="사주 보기">
               <button
                 type="button"
@@ -904,6 +1204,7 @@ function App() {
                     : '사주 보기'}
               </button>
 
+              {user && (
               <div className="action-row">
                 <button
                   type="button"
@@ -922,13 +1223,26 @@ function App() {
                   삭제
                 </button>
               </div>
-              {!isEditing && (
+              )}
+              {user && !isEditing && (
                 <p className="action-hint">
                   사이드바에서 날짜를 선택하면 이전 해석을 수정·삭제할 수 있어요.
                   생년월일을 바꾸려면 프로필에서 수정해 주세요.
                 </p>
               )}
+              {!user && !result && (
+                <p className="action-hint">
+                  결과는 바로 나와요. 뒷부분은 로그인하면 이어서 볼 수 있어요.
+                </p>
+              )}
+              {!user && !result && readingCount > 0 && (
+                <p className="reading-count">
+                  총 <span>{readingCount.toLocaleString('ko-KR')}</span>개의 사주가
+                  생성되었습니다
+                </p>
+              )}
             </section>
+            )}
 
             {error && <p className="error">{error}</p>}
             {notice && !error && <p className="notice">{notice}</p>}
@@ -965,35 +1279,23 @@ function App() {
             )}
 
             {!loading && result && (
-              <div className="result-stage">
-                <ResultMascot />
-                <section
-                  ref={resultRef}
-                  key={selectedId ?? 'new-result'}
-                  className="result"
-                  aria-live="polite"
-                >
-                  <p className="result-label">사주 해석</p>
-                  <h2>{name}님의 이야기</h2>
-                  {(birthDate || gender || calendarType) && (
-                    <p className="result-meta">
-                      {[birthDate, birthTime || null, gender, calendarType]
-                        .filter(Boolean)
-                        .join(' · ')}
-                    </p>
-                  )}
-                  <div className="result-body">
-                    {resultParagraphs.map((paragraph, index) => (
-                      <p
-                        key={`${selectedId ?? 'new'}-${index}`}
-                        className="result-text"
-                      >
-                        {paragraph}
-                      </p>
-                    ))}
-                  </div>
-                </section>
-              </div>
+              <ResultView
+                name={name}
+                birthDate={birthDate}
+                birthTime={birthTime}
+                gender={gender}
+                calendarType={calendarType}
+                result={result}
+                resultKey={selectedId ?? 'new-result'}
+                resultRef={resultRef}
+                onShare={user ? handleShare : undefined}
+                shareBusy={shareBusy}
+                shareDisabled={saving}
+                locked={!user}
+                onUnlock={handleGoogleLogin}
+                unlockBusy={authBusy}
+                unlockDisabled={!isSupabaseConfigured}
+              />
             )}
           </>
         )}
