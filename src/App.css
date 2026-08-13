@@ -196,6 +196,11 @@
   transform: translateY(-1px);
 }
 
+.new-saju-btn.is-active {
+  background: rgba(212, 120, 142, 0.18);
+  border-color: var(--brand);
+}
+
 .sidebar-empty {
   font-size: 0.88rem;
   color: var(--ink-soft);
@@ -622,6 +627,56 @@
   cursor: wait;
 }
 
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.5rem;
+  z-index: 60;
+  transform: translateX(-50%);
+  max-width: min(calc(100% - 2rem), 360px);
+  padding: 0.85rem 1.2rem;
+  border-radius: 999px;
+  border: 1px solid rgba(212, 120, 142, 0.35);
+  background: rgba(58, 42, 48, 0.92);
+  color: #fff7f9;
+  font-family: var(--display);
+  font-size: 0.92rem;
+  font-weight: 700;
+  text-align: center;
+  box-shadow: 0 12px 32px rgba(58, 42, 48, 0.22);
+  animation: toast-in 0.38s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.toast.is-leaving {
+  animation: toast-out 0.36s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    filter: blur(4px);
+    transform: translateX(-50%) translateY(16px) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
+}
+
+@keyframes toast-out {
+  from {
+    opacity: 1;
+    filter: blur(0);
+    transform: translateX(-50%) translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    filter: blur(4px);
+    transform: translateX(-50%) translateY(12px) scale(0.96);
+  }
+}
+
 .error {
   color: var(--danger);
   font-size: 0.95rem;
@@ -638,9 +693,27 @@
   background: rgba(212, 120, 142, 0.1);
 }
 
+.result-stage {
+  position: relative;
+  margin-top: 0.15rem;
+}
+
+.result-mascot {
+  display: block;
+  width: min(46%, 176px);
+  height: auto;
+  margin: 0 auto -1.05rem;
+  position: relative;
+  z-index: 1;
+  filter: drop-shadow(0 10px 16px rgba(184, 92, 116, 0.2));
+  animation: mascot-float 3.8s ease-in-out infinite;
+  pointer-events: none;
+  user-select: none;
+}
+
 .result {
   margin-top: 0.35rem;
-  padding: 1.35rem 1.25rem 1.45rem;
+  padding: 1.85rem 1.25rem 1.45rem;
   border-radius: 18px;
   border: 1px solid rgba(212, 120, 142, 0.28);
   background:
@@ -801,6 +874,16 @@
   }
 }
 
+@keyframes mascot-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-7px);
+  }
+}
+
 @media (max-width: 720px) {
   .layout {
     grid-template-columns: 1fr;
@@ -845,7 +928,9 @@
   .form-panel,
   .profile-card,
   .modal,
+  .toast,
   .result,
+  .result-mascot,
   .brand-mark,
   .skeleton-line {
     animation: none;

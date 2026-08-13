@@ -35,6 +35,19 @@ function formatBirthDate(value) {
   }).format(date)
 }
 
+function ResultMascot() {
+  return (
+    <img
+      className="result-mascot"
+      src="/images/mascot.png"
+      alt="사주미 치즈고양이"
+      width="345"
+      height="399"
+      decoding="async"
+    />
+  )
+}
+
 function isProfileComplete(row) {
   return Boolean(row?.name && row?.birth_date && row?.gender && row?.calendar_type)
 }
@@ -141,6 +154,8 @@ function App() {
   const [notice, setNotice] = useState('')
   const skeletonRef = useRef(null)
   const resultRef = useRef(null)
+  const toastTimerRef = useRef(null)
+  const [toast, setToast] = useState(null)
 
   // 저장된 사주 목록 (사이드바) — Read
   const [readings, setReadings] = useState([])
@@ -345,6 +360,24 @@ function App() {
   }, [loading])
 
   useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    }
+  }, [])
+
+  function hideToast() {
+    setToast((current) => (current ? { ...current, leaving: true } : null))
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    toastTimerRef.current = setTimeout(() => setToast(null), 380)
+  }
+
+  function showToast(message) {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    setToast({ message, id: Date.now(), leaving: false })
+    toastTimerRef.current = setTimeout(hideToast, 2400)
+  }
+
+  useEffect(() => {
     if (!needsOnboarding) return undefined
     const previous = document.body.style.overflow
     document.body.style.overflow = 'hidden'
@@ -413,7 +446,14 @@ function App() {
     })
   }
 
-  function handleNewSaju() {
+  function handleNewSaju({ fromButton = false } = {}) {
+    const alreadyOpen = view === 'saju' && !selectedId
+    if (fromButton && alreadyOpen) {
+      showToast('이미 새 사주 화면이 열려 있어요.')
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+      return
+    }
+
     setView('saju')
     setSelectedId(null)
     applyProfile(profile)
@@ -661,6 +701,7 @@ function App() {
     .filter(Boolean)
 
   const isEditing = Boolean(selectedId)
+  const isNewSajuPage = view === 'saju' && !selectedId
   const displayName =
     profile?.name ||
     user?.user_metadata?.full_name ||
@@ -745,8 +786,8 @@ function App() {
         <p className="sidebar-title">저장된 사주</p>
         <button
           type="button"
-          className="new-saju-btn"
-          onClick={handleNewSaju}
+          className={isNewSajuPage ? 'new-saju-btn is-active' : 'new-saju-btn'}
+          onClick={() => handleNewSaju({ fromButton: true })}
         >
           새 사주 만들기
         </button>
@@ -893,60 +934,66 @@ function App() {
             {notice && !error && <p className="notice">{notice}</p>}
 
             {loading && (
-              <section
-                ref={skeletonRef}
-                className="result skeleton-result"
-                aria-busy="true"
-                aria-live="polite"
-              >
-                <p className="skeleton-status">사주 명식을 세우는 중…</p>
-                <div className="skeleton-line skeleton-title" />
-                <div className="skeleton-block">
-                  <div className="skeleton-line w-95" />
-                  <div className="skeleton-line w-88" />
-                  <div className="skeleton-line w-92" />
-                  <div className="skeleton-line w-70" />
-                </div>
-                <div className="skeleton-block">
-                  <div className="skeleton-line w-90" />
-                  <div className="skeleton-line w-96" />
-                  <div className="skeleton-line w-80" />
-                  <div className="skeleton-line w-60" />
-                </div>
-                <div className="skeleton-block">
-                  <div className="skeleton-line w-85" />
-                  <div className="skeleton-line w-75" />
-                </div>
-              </section>
+              <div className="result-stage">
+                <ResultMascot />
+                <section
+                  ref={skeletonRef}
+                  className="result skeleton-result"
+                  aria-busy="true"
+                  aria-live="polite"
+                >
+                  <p className="skeleton-status">사주 명식을 세우는 중…</p>
+                  <div className="skeleton-line skeleton-title" />
+                  <div className="skeleton-block">
+                    <div className="skeleton-line w-95" />
+                    <div className="skeleton-line w-88" />
+                    <div className="skeleton-line w-92" />
+                    <div className="skeleton-line w-70" />
+                  </div>
+                  <div className="skeleton-block">
+                    <div className="skeleton-line w-90" />
+                    <div className="skeleton-line w-96" />
+                    <div className="skeleton-line w-80" />
+                    <div className="skeleton-line w-60" />
+                  </div>
+                  <div className="skeleton-block">
+                    <div className="skeleton-line w-85" />
+                    <div className="skeleton-line w-75" />
+                  </div>
+                </section>
+              </div>
             )}
 
             {!loading && result && (
-              <section
-                ref={resultRef}
-                key={selectedId ?? 'new-result'}
-                className="result"
-                aria-live="polite"
-              >
-                <p className="result-label">사주 해석</p>
-                <h2>{name}님의 이야기</h2>
-                {(birthDate || gender || calendarType) && (
-                  <p className="result-meta">
-                    {[birthDate, birthTime || null, gender, calendarType]
-                      .filter(Boolean)
-                      .join(' · ')}
-                  </p>
-                )}
-                <div className="result-body">
-                  {resultParagraphs.map((paragraph, index) => (
-                    <p
-                      key={`${selectedId ?? 'new'}-${index}`}
-                      className="result-text"
-                    >
-                      {paragraph}
+              <div className="result-stage">
+                <ResultMascot />
+                <section
+                  ref={resultRef}
+                  key={selectedId ?? 'new-result'}
+                  className="result"
+                  aria-live="polite"
+                >
+                  <p className="result-label">사주 해석</p>
+                  <h2>{name}님의 이야기</h2>
+                  {(birthDate || gender || calendarType) && (
+                    <p className="result-meta">
+                      {[birthDate, birthTime || null, gender, calendarType]
+                        .filter(Boolean)
+                        .join(' · ')}
                     </p>
-                  ))}
-                </div>
-              </section>
+                  )}
+                  <div className="result-body">
+                    {resultParagraphs.map((paragraph, index) => (
+                      <p
+                        key={`${selectedId ?? 'new'}-${index}`}
+                        className="result-text"
+                      >
+                        {paragraph}
+                      </p>
+                    ))}
+                  </div>
+                </section>
+              </div>
             )}
           </>
         )}
@@ -986,6 +1033,16 @@ function App() {
               </button>
             </form>
           </div>
+        </div>
+      )}
+      {toast && (
+        <div
+          key={toast.id}
+          className={toast.leaving ? 'toast is-leaving' : 'toast'}
+          role="status"
+          aria-live="polite"
+        >
+          {toast.message}
         </div>
       )}
     </div>
